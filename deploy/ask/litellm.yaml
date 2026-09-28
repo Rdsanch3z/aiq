@@ -1,0 +1,40 @@
+# ASK — configuração do LiteLLM: um único endpoint OpenAI-compatible na
+# frente dos deployments do Azure AI Foundry.
+#
+# Os nomes em `model_name` abaixo são os mesmos usados em
+# configs/config_ask.yml (llms.*.model_name / knowledge_search.embed_model)
+# — é o que liga as duas pontas. Não renomeie um lado sem o outro.
+#
+# EDITE os três "model:" abaixo com o nome exato de cada deployment no seu
+# recurso Azure AI Foundry (Azure > seu recurso > Deployments). O resto
+# (endpoint, chave, versão da API) vem do deploy/.env — ver
+# deploy/ask/.env.ask.example.
+
+model_list:
+  - model_name: modelo_rapido
+    litellm_params:
+      model: azure/TROQUE-PELO-NOME-DO-DEPLOYMENT-RAPIDO
+      api_base: os.environ/AZURE_OPENAI_ENDPOINT
+      api_key: os.environ/AZURE_OPENAI_API_KEY
+      api_version: os.environ/AZURE_OPENAI_API_VERSION
+
+  - model_name: modelo_raciocinador
+    litellm_params:
+      model: azure/TROQUE-PELO-NOME-DO-DEPLOYMENT-RACIOCINADOR
+      api_base: os.environ/AZURE_OPENAI_ENDPOINT
+      api_key: os.environ/AZURE_OPENAI_API_KEY
+      api_version: os.environ/AZURE_OPENAI_API_VERSION
+
+  - model_name: modelo-embeddings
+    litellm_params:
+      model: azure/TROQUE-PELO-NOME-DO-DEPLOYMENT-DE-EMBEDDINGS
+      api_base: os.environ/AZURE_OPENAI_ENDPOINT
+      api_key: os.environ/AZURE_OPENAI_API_KEY
+      api_version: os.environ/AZURE_OPENAI_API_VERSION
+
+# Chave única que o AI-Q usa para autenticar contra este gateway
+# (AIQ_MODEL_API_KEY no deploy/.env deve ter o MESMO valor de
+# LITELLM_MASTER_KEY). Sem banco de dados próprio — deployment simples,
+# de um único operador, sem necessidade de chaves por usuário/equipe.
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

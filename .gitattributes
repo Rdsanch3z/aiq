@@ -1,2 +1,6 @@
 *.pdf filter=lfs diff=lfs merge=lfs -text
 *.zip filter=lfs diff=lfs merge=lfs -text
+
+# Scripts de shell sempre com LF, mesmo em checkout no Windows — CRLF quebra
+# o shebang e a execução no Linux (#!/usr/bin/env bash\r).
+*.sh text eol=lf

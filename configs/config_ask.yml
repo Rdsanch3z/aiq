@@ -1,0 +1,147 @@
+# ASK — perfil de workflow do blueprint, adaptado do upstream
+# configs/config_web_opensearch.yml.
+#
+# Duas mudanças em relação ao original:
+#   1. Camada de modelo: nenhum modelo NIM/NVIDIA. As duas chamadas de LLM
+#      (rápida e raciocinadora) falam com o gateway LiteLLM
+#      (deploy/ask/litellm.yaml), que por baixo chama o Azure AI Foundry.
+#   2. Fontes de dados: só a base de conhecimento. Sem busca na internet —
+#      o ASK responde com o que está na base do domínio, nunca com o que
+#      encontrar na web.
+#
+# Ver a seção 5 ("Configuração") da documentação técnica do blueprint ASK
+# para o detalhe de cada campo.
+
+general:
+  use_uvloop: true
+  telemetry:
+    logging:
+      console:
+        _type: console
+        level: INFO
+
+  front_end:
+    _type: aiq_api
+    runner_class: aiq_api.plugin.AIQAPIWorker
+    # Async Job API — o docker-compose.yaml upstream já aponta isso para o
+    # Postgres do compose; o default abaixo só vale rodando fora do Docker.
+    db_url: ${NAT_JOB_STORE_DB_URL:-sqlite+aiosqlite:///./jobs.db}
+    expiry_seconds: 86400  # 24h — quanto tempo um job concluído fica no banco
+    cors:
+      allow_origin_regex: 'http://localhost(:\d+)?|http://127.0.0.1(:\d+)?'
+      allow_methods:
+        - GET
+        - POST
+        - DELETE
+        - OPTIONS
+      allow_headers:
+        - "*"
+      allow_credentials: true
+      expose_headers:
+        - "*"
+
+llms:
+  # Os dois deployments do Azure, falados através do gateway LiteLLM — não
+  # direto com o Azure — para centralizar credencial, log de custo por
+  # chamada e a troca futura de provedor num só lugar (deploy/ask/litellm.yaml).
+  # AIQ_MODEL_ENDPOINT e AIQ_MODEL_API_KEY vêm do deploy/.env.
+  modelo_rapido:
+    _type: openai
+    model_name: modelo_rapido          # alias espelhado em deploy/ask/litellm.yaml
+    base_url: ${AIQ_MODEL_ENDPOINT}
+    api_key: ${AIQ_MODEL_API_KEY}
+    temperature: 0.2
+    max_tokens: 8192
+    num_retries: 5
+    parallel_tool_calls: false
+
+  modelo_raciocinador:
+    _type: openai
+    model_name: modelo_raciocinador    # alias espelhado em deploy/ask/litellm.yaml
+    base_url: ${AIQ_MODEL_ENDPOINT}
+    api_key: ${AIQ_MODEL_API_KEY}
+    temperature: 0.2
+    max_tokens: 32768
+    num_retries: 5
+    parallel_tool_calls: false
+
+functions:
+  # =========================================================================
+  # Data Source Registry — só a base de conhecimento. Sem busca na internet:
+  # o ASK responde com a base do domínio, nunca com o que achar na web.
+  # =========================================================================
+  data_sources:
+    _type: data_source_registry
+    sources:
+      - id: knowledge_layer
+        name: "Base de Conhecimento"
+        description: "Busca nos documentos e regras registrados para este domínio."
+        tools:
+          - knowledge_search
+
+  # Camada de conhecimento — backend agnóstico (OpenSearch self-hosted, ver
+  # deploy/ask/docker-compose.ask.yaml), no lugar do Azure AI Search original.
+  #
+  # Para dar a cada domínio/fabricante sua própria base selecionável (em vez
+  # de uma coleção genérica só): duplique este bloco com um novo nome de
+  # função (ex.: knowledge_search_fabricante_y), um collection_name
+  # diferente, e adicione-o como uma nova entrada em data_sources acima.
+  knowledge_search:
+    _type: knowledge_retrieval
+    backend: opensearch
+    collection_name: ${COLLECTION_NAME:-ask_default}
+    top_k: 5
+    opensearch_url: ${OPENSEARCH_URL:-http://opensearch:9200}
+    opensearch_auth_type: ${OPENSEARCH_AUTH_TYPE:-none}
+    opensearch_aws_region: ${AWS_REGION:-us-east-1}
+    opensearch_aws_service: ${OPENSEARCH_AWS_SERVICE:-aoss}
+    opensearch_index_prefix: ${OPENSEARCH_INDEX_PREFIX:-ask}
+    # Confirmar contra o modelo de embedding escolhido no Azure (atividade
+    # 0.11 da Fase 0) — mudar este número depois exige reindexar tudo.
+    opensearch_embedding_dim: ${AIQ_EMBED_DIM:-1536}
+    opensearch_ingestion_mode: ${OPENSEARCH_INGESTION_MODE:-auto}
+    opensearch_dask_scheduler_address: ${NAT_DASK_SCHEDULER_ADDRESS:-}
+    opensearch_dask_file_transfer: ${OPENSEARCH_DASK_FILE_TRANSFER:-bytes}
+    # Embeddings também passam pelo LiteLLM — mesmo gateway, alias próprio.
+    embed_model: ${AIQ_EMBED_MODEL:-modelo-embeddings}
+    embed_base_url: ${AIQ_MODEL_ENDPOINT}
+
+  # =========================================================================
+  # Agentes — sem `tools:` explícito, herdam tudo do registro acima (só a
+  # base de conhecimento). Sem exclude_tools: não há mais ferramenta de
+  # busca na internet para excluir.
+  # =========================================================================
+  intent_classifier:
+    _type: intent_classifier
+    llm: modelo_rapido
+
+  clarifier_agent:
+    _type: clarifier_agent
+    llm: modelo_raciocinador
+    max_turns: 3
+    log_response_max_chars: 2000
+
+  shallow_research_agent:
+    _type: shallow_research_agent
+    llm: modelo_rapido
+    max_llm_turns: 10
+    max_tool_iterations: 5
+
+  deep_research_agent:
+    _type: deep_research_agent
+    enable_citation_verification: true
+    # Os 5 papéis internos (roteador de fontes, planejador, pesquisadores,
+    # orquestrador interno, redator) apontam todos para o mesmo modelo
+    # raciocinador — 2 deployments no total, não 5 (ver seção 5 da doc).
+    orchestrator_llm: modelo_raciocinador
+    source_router_llm: modelo_raciocinador
+    researcher_llm: modelo_raciocinador
+    planner_llm: modelo_raciocinador
+    writer_llm: modelo_raciocinador
+
+workflow:
+  _type: chat_deepresearcher_agent
+  enable_escalation: true    # Agente Shallow pode escalar para o Clarifier/Deep
+  enable_clarifier: true     # Deep passa pelo Clarifier antes de investigar
+  use_async_deep_research: true
+  checkpoint_db: ${AIQ_CHECKPOINT_DB:-./checkpoints.db}

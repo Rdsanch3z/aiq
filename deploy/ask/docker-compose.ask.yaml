@@ -1,0 +1,123 @@
+# ASK — override sobre deploy/compose/docker-compose.yaml (upstream, sem
+# edição, para não gerar conflito quando o blueprint original for
+# atualizado). Uso, a partir de deploy/compose/:
+#
+#   docker compose --env-file ../.env \
+#     -f docker-compose.yaml -f ../ask/docker-compose.ask.yaml up -d
+#
+# O que este arquivo muda:
+#   - aiq-agent: aponta para configs/config_ask.yml; fecha a porta 8000 do
+#     host (só o Caddy fica público)
+#   - frontend: fecha a porta 3000 do host (idem)
+#   - adiciona: opensearch (camada de conhecimento), litellm (gateway de
+#     modelo Azure), caddy (TLS automático, único ponto de entrada)
+#
+# O que o upstream já traz e que NÃO muda aqui: postgres — ver a pergunta
+# "Por que o Postgres?" na documentação técnica do blueprint ASK.
+
+services:
+  aiq-agent:
+    environment:
+      - CONFIG_FILE=/app/configs/config_ask.yml
+      - OPENSEARCH_URL=${OPENSEARCH_URL:-http://opensearch:9200}
+    # !reset (não só uma lista vazia) — do contrário o Compose CONCATENA a
+    # lista deste arquivo com a do upstream em vez de substituí-la, e a
+    # porta continuaria publicada. Requer Docker Compose 2.24+ (o
+    # one-click-install.sh já instala uma versão bem mais nova que essa).
+    ports: !reset []
+    depends_on:
+      postgres:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+      litellm:
+        condition: service_started
+
+  frontend:
+    ports: !reset []
+
+  # ---------------------------------------------------------------------
+  # Gateway de modelo: único ponto que fala com o Azure AI Foundry.
+  # ---------------------------------------------------------------------
+  litellm:
+    image: ghcr.io/berriai/litellm:v1.90.2
+    container_name: ask-litellm
+    env_file:
+      - ../.env
+    volumes:
+      - ./litellm.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    networks:
+      - aiq-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4000/health/liveliness"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ---------------------------------------------------------------------
+  # Camada de conhecimento: substitui o Azure AI Search do perfil original
+  # por um backend agnóstico, auto-hospedado.
+  # ---------------------------------------------------------------------
+  opensearch:
+    # 2.19.x — linha estável mais recente compatível com o cliente que o
+    # AI-Q usa (opensearch-py>=2.4.0, sem teto de versão fixado). A linha
+    # 3.x já existe (3.8.0 no momento da escrita) mas não está validada
+    # contra o adapter do AI-Q — avaliar na Fase 0 antes de migrar.
+    image: opensearchproject/opensearch:2.19.6
+    container_name: ask-opensearch
+    environment:
+      - discovery.type=single-node
+      # Sem plugin de segurança: aceitável só porque este serviço não tem
+      # porta publicada para o host (rede interna do Docker) — ver a nota
+      # de segurança no deploy/ask/README.md antes de expor isso de outro
+      # jeito.
+      - DISABLE_SECURITY_PLUGIN=true
+      - bootstrap.memory_lock=true
+      - OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - ask-opensearch-data:/usr/share/opensearch/data
+    networks:
+      - aiq-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ---------------------------------------------------------------------
+  # Único ponto de entrada público: TLS automático, sem passo manual.
+  # ---------------------------------------------------------------------
+  caddy:
+    image: caddy:2-alpine
+    container_name: ask-caddy
+    environment:
+      - ASK_DOMAIN=${ASK_DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ask-caddy-data:/data
+      - ask-caddy-config:/config
+    networks:
+      - aiq-network
+    depends_on:
+      - frontend
+    restart: unless-stopped
+
+volumes:
+  ask-opensearch-data:
+    driver: local
+  ask-caddy-data:
+    driver: local
+  ask-caddy-config:
+    driver: local

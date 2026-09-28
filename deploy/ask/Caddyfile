@@ -1,0 +1,11 @@
+# ASK — proxy reverso e TLS automático.
+#
+# Com ASK_DOMAIN=localhost (default), o Caddy serve HTTPS local com um
+# certificado próprio (aviso de segurança no navegador é esperado).
+# Apontando ASK_DOMAIN para um domínio real e público, o Caddy emite um
+# certificado Let's Encrypt de verdade na primeira requisição, sem passo
+# manual nenhum.
+
+{$ASK_DOMAIN} {
+	reverse_proxy frontend:3000
+}
